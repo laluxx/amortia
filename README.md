@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo.svg" alt="Amortia Logo" width="200" style="filter: brightness(0) invert(1);"/>
+  <img src="logo-white.svg" alt="Amortia Logo" width="200"/>
   
   # Amortia
   
@@ -15,9 +15,9 @@
 
 ## What is Amortia?
 
-Amortia is a pure functional programming language designed to compile to the BEAM VM. It combines ML-style syntax with the battle-tested concurrency and fault-tolerance of Erlang's virtual machine.
+Amortia is a pure functional programming language designed to compile to the BEAM VM. It combines Haskell and Lisp syntax with the battle-tested concurrency and fault-tolerance of Erlang's virtual machine.
 
-**Current Status:** Parser & AST Visualizer  
+**Current Status:** Parser & AST Visualizer
 The compiler pipeline is under active development. Right now, you can parse Amortia code, generate AST in JSON format, and explore it with an interactive hot-reloading visualizer.
 
 ### Compilation Pipeline
@@ -136,13 +136,13 @@ defn length :: [a] -> Int {
 }
 ```
 
-| Pattern | Description |
-|---------|-------------|
-| `x` | Variable binding |
-| `_` | Wildcard |
-| `[]` | Empty list |
-| `[x\|xs]` | Head and tail |
-| `42` | Literal match |
+| Pattern   | Description      |
+|-----------|------------------|
+| `x`       | Variable binding |
+| `_`       | Wildcard         |
+| `[]`      | Empty list       |
+| `[x\|xs]` | Head and tail    |
+| `42`      | Literal match    |
 
 ### Type System
 
