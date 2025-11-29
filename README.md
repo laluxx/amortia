@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo-white.svg" alt="Amortia Logo" width="200"/>
+  <img src="logo.svg" alt="Amortia Logo" width="200"/>
   
   # Amortia
   
