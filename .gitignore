@@ -1,4 +1,5 @@
 *.hi
 *.o
 amortia
+src.erl
 test-output.json

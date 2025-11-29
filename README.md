@@ -112,14 +112,17 @@ defn last :: [a] -> a {
 ### Usage
 
 ```bash
+# Compile to erlang
+amortia example.amor
+
 # Watch mode with hot reloading
-amortia --watch example.amor
+amortia watch example.amor
 
 # Visualize once
-amortia --visualize example.amor
+amortia visualize example.amor
 
-# Export to JSON
-amortia --json example.amor output.json
+# Export AST to JSON
+amortia json example.amor output.json
 ```
 
 ---
@@ -191,6 +194,7 @@ make clean    # Clean artifacts
 ```
 amortia/
 ├── Parser.hs          # Megaparsec-based parser
+├── Codegen.hs         # Erlang code generation
 ├── Main.hs            # CLI tool & visualizer
 ├── visualizer.html    # Interactive AST viewer
 └── Makefile           # Build configuration

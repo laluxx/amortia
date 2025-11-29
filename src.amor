@@ -5,3 +5,18 @@ be as many lines as you want."
     [x] -> x
     [_|xs] -> last xs
 }
+
+defn tail :: [a] -> [a] {
+  "Return the tail
+of a collection."
+    [] -> error badarg
+    [_|xs] -> xs
+}
+
+defn head :: [a] -> a {
+  "Return the first element
+of a collection."
+    [] -> error badarg
+    [x|_] -> x
+}
+
