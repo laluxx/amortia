@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
 
 module Parser
   ( -- * Types
@@ -41,11 +42,16 @@ type Parser = Parsec Void Text
 
 -- * AST Definition
 
-data Program = Program [TopLevel]
-  deriving (Show, Eq, Generic, ToJSON)
 
-data TopLevel = FunctionDef FunctionDefinition
-  deriving (Show, Eq, Generic, ToJSON)
+newtype Program = Program [TopLevel]
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON)
+
+newtype TopLevel = FunctionDef FunctionDefinition
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON)
+
+
 
 data FunctionDefinition = FunctionDefinition
   { funName :: Text

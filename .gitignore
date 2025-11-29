@@ -1,0 +1,4 @@
+*.hi
+*.o
+amortia
+test-output.json
