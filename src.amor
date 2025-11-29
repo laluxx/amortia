@@ -20,3 +20,8 @@ of a collection."
     [x|_] -> x
 }
 
+-- TODO
+-- defn main :: () {
+--     display "Hello, World!~n"
+--     halt 0
+-- }

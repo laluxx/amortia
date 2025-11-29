@@ -1,0 +1,2 @@
+#!/bin/bash
+erl -noshell -pa . -s src main -s init stop

@@ -4,18 +4,43 @@
 module Codegen
   ( generateErlang
   , generateErlangFile
+  , generateErlangWithModule
   ) where
 
 import Parser
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.List (intercalate)
+import System.Process (readProcessWithExitCode, callCommand)
+import System.Exit (ExitCode(..))
+import System.FilePath (takeBaseName)
 
 
--- | Generate Erlang code from AST
+-- | Generate Erlang code from AST with module name
+generateErlangWithModule :: Text -> Program -> Text
+generateErlangWithModule moduleName (Program topLevels) =
+  T.unlines $ [moduleDecl, exportDecl, mainExp, ""] ++ 
+              map generateTopLevel topLevels ++ 
+              ["", mainFunction]
+  where
+    moduleDecl = "-module(" <> moduleName <> ")."
+    exportDecl = "-export([" <> exports <> "])."
+    mainExp = "-export([main/0])."
+    exports = T.intercalate ", " $ map functionExport topLevels
+    
+    functionExport (FunctionDef FunctionDefinition{..}) =
+      funName <> "/" <> T.pack (show $ length $ clausePatterns $ head funClauses)
+    
+    -- Generate main function
+    mainFunction = T.unlines
+      [ "main() ->"
+      , "    io:format(\"Amortia program~n\"),"
+      , "    halt(0)."
+      ]
+
+-- | Generate Erlang code from AST (legacy, uses default module name)
 generateErlang :: Program -> Text
-generateErlang (Program topLevels) =
-  T.unlines $ map generateTopLevel topLevels
+generateErlang prog = generateErlangWithModule "amortia" prog
 
 -- | Generate code for a top-level definition
 generateTopLevel :: TopLevel -> Text
@@ -32,15 +57,20 @@ generateFunction FunctionDefinition{..} =
       Nothing -> []
       Just doc -> map (\line -> "%~ " <> line) (T.lines doc)
     
-    clauseLines = map (generateClause funName) funClauses
+    -- Generate clauses with proper semicolon/period handling
+    clauseLines = case funClauses of
+      [] -> []
+      clauses -> zipWith (generateClause funName) clauses isLast
+        where isLast = replicate (length clauses - 1) False ++ [True]
 
 -- | Generate code for a single clause
-generateClause :: Text -> Clause -> Text
-generateClause funcName Clause{..} =
-  funcName <> "(" <> patterns <> ") -> " <> body <> ";"
+generateClause :: Text -> Clause -> Bool -> Text
+generateClause funcName Clause{..} isLast =
+  funcName <> "(" <> patterns <> ") -> " <> body <> terminator
   where
     patterns = T.intercalate ", " $ map generatePattern clausePatterns
     body = generateExpr clauseBody
+    terminator = if isLast then "." else ";"
 
 -- | Generate code for a pattern
 generatePattern :: Pattern -> Text
@@ -87,8 +117,31 @@ generateLiteral lit = case lit of
   LString s -> "\"" <> s <> "\""
   LAtom a -> a
 
--- | Generate Erlang code and write to file
+-- | Generate Erlang code and compile to BEAM with runner script
 generateErlangFile :: FilePath -> Program -> IO ()
 generateErlangFile outputFile program = do
-  let erlangCode = generateErlang program
+  let moduleName = T.pack $ takeBaseName outputFile
+  let erlangCode = generateErlangWithModule moduleName program
   writeFile outputFile (T.unpack erlangCode)
+  compileErlang outputFile
+  -- Create a runner script
+  createRunnerScript moduleName outputFile
+
+-- | Compile Erlang file to BEAM bytecode
+compileErlang :: FilePath -> IO ()
+compileErlang erlFile = do
+  result <- readProcessWithExitCode "erlc" [erlFile] ""
+  case result of
+    (ExitSuccess, _, _) -> return ()
+    (ExitFailure _, _, err) -> putStrLn $ "Erlang compilation failed:\n" ++ err
+
+-- | Create a runner script for the BEAM module
+createRunnerScript :: Text -> FilePath -> IO ()
+createRunnerScript moduleName erlFile = do
+  let scriptName = takeBaseName erlFile  -- e.g., "src"
+  let scriptContent = unlines
+        [ "#!/bin/bash"
+        , "erl -noshell -pa . -s " ++ T.unpack moduleName ++ " main -s init stop"
+        ]
+  writeFile scriptName scriptContent
+  callCommand $ "chmod +x " ++ scriptName

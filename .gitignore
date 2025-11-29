@@ -1,5 +1,6 @@
 *.hi
 *.o
+*.beam
 amortia
 src.erl
 test-output.json

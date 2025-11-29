@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-
 module Main where
 
 import Parser
@@ -10,7 +9,7 @@ import System.Exit (exitFailure)
 import Data.Aeson (encodeFile)
 import System.FilePath (replaceExtension)
 
--- | Parse source file and generate Erlang code
+-- | Parse source file and generate Erlang code with BEAM compilation
 parseAndGenerate :: FilePath -> FilePath -> IO ()
 parseAndGenerate inputFile outputFile = do
   result <- parseFromFile inputFile
@@ -38,15 +37,14 @@ main = do
     ["visualize", inputFile] -> visualizeAST inputFile
     ["json", inputFile] -> parseToJSON inputFile "ast.json"
     ["json", inputFile, outputFile] -> parseToJSON inputFile outputFile
-    ["erl", inputFile] -> parseAndGenerate inputFile (replaceExtension inputFile ".erl")
-    ["erl", inputFile, outputFile] -> parseAndGenerate inputFile outputFile
     [inputFile] -> parseAndGenerate inputFile (replaceExtension inputFile ".erl")
+    [inputFile, outputFile] -> parseAndGenerate inputFile outputFile
     _ -> do
       putStrLn "Amortia Compiler & Visualizer"
       putStrLn ""
       putStrLn "Usage:"
-      putStrLn "  amortia <file>                         Compile to Erlang (output: .erl)"
-      putStrLn "  amortia erl <file> [output]            Compile to Erlang with custom output"
+      putStrLn "  amortia <file>                         Compile to BEAM executable"
+      putStrLn "  amortia <file> <output>                Compile with custom output name"
       putStrLn "  amortia json <file> [output]           Generate AST as JSON"
       putStrLn "  amortia watch <file>                   Watch file and auto-regenerate (hot reload)"
       putStrLn "  amortia visualize <file>               Open AST visualizer in browser"
