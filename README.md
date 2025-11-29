@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo.svg" alt="Amortia Logo" width="200"/>
+  <img src="logo.svg" alt="Amortia Logo" width="200" style="filter: brightness(0) invert(1);"/>
   
   # Amortia
   
@@ -15,28 +15,76 @@
 
 ## What is Amortia?
 
-Amortia is a pure functional programming language designed to compile to the BEAM VM. It combines Haskell and Lisp syntax with the battle-tested concurrency and fault-tolerance of Erlang's virtual machine.
+Amortia is a pure functional programming language designed to compile to the BEAM VM. It combines ML-style syntax with the battle-tested concurrency and fault-tolerance of Erlang's virtual machine.
 
-**Current Status:** Parser & AST Visualizer
+**Current Status:** Parser & AST Visualizer  
 The compiler pipeline is under active development. Right now, you can parse Amortia code, generate AST in JSON format, and explore it with an interactive hot-reloading visualizer.
 
 ### Compilation Pipeline
 
-```mermaid
-graph LR
-    A[Amortia Source] -->|Parser ✅| B[AST]
-    B -->|Compiler 🚧| C[Erlang]
-    C -->|erlc| D[Core Erlang]
-    D -->|beam_asm| E[BEAM Bytecode]
-    
-    style A fill:#c586c0
-    style B fill:#4ec9b0
-    style E fill:#ce9178
-```
+<table>
+<tr>
+<td align="center" width="20%">
+  
+**Amortia**<br/>
+`.amor`
+  
+</td>
+<td align="center" width="5%">
+  
+→<br/>
+✅
+  
+</td>
+<td align="center" width="20%">
+  
+**AST**<br/>
+`JSON`
+  
+</td>
+<td align="center" width="5%">
+  
+→<br/>
+🚧
+  
+</td>
+<td align="center" width="20%">
+  
+**Erlang**<br/>
+`.erl`
+  
+</td>
+<td align="center" width="5%">
+  
+→
+  
+</td>
+<td align="center" width="20%">
+  
+**Core**<br/>
+`.core`
+  
+</td>
+<td align="center" width="5%">
+  
+→
+  
+</td>
+<td align="center" width="20%">
+  
+**BEAM**<br/>
+`.beam`
+  
+</td>
+</tr>
+</table>
 
 ---
 
 ## Quick Start
+
+> [!NOTE]
+> Amortia requires GHC (Glasgow Haskell Compiler) >= 9.0 and Make
 
 ### Installation
 
@@ -54,7 +102,7 @@ Create a file `example.amor`:
 ```haskell
 defn last :: [a] -> a {
   "Returns the last element of a list.
-Raises badarg error if the list is empty."
+   Raises badarg error if the list is empty."
     [] -> error badarg
     [x] -> x
     [_|xs] -> last xs
@@ -81,20 +129,20 @@ amortia --json example.amor output.json
 ### Pattern Matching
 
 ```haskell
-defn length :: [a] -> a {
+defn length :: [a] -> Int {
   "Calculate the length of a list"
     [] -> 0
     [_|xs] -> 1 + length xs
 }
 ```
 
-| Pattern  | Description      |
-|----------|------------------|
-| `x`      | Variable binding |
-| `_`      | Wildcard         |
-| `[]`     | Empty list       |
-| `[x|xs]` | Head and tail    |
-| `42`     | Literal match    |
+| Pattern | Description |
+|---------|-------------|
+| `x` | Variable binding |
+| `_` | Wildcard |
+| `[]` | Empty list |
+| `[x\|xs]` | Head and tail |
+| `42` | Literal match |
 
 ### Type System
 
@@ -111,6 +159,9 @@ defn map :: (a -> b) -> [a] -> [b] {
 ---
 
 ## AST Visualizer
+
+> [!TIP]
+> Use watch mode for the best development experience with instant feedback!
 
 The interactive visualizer provides:
 - Side-by-side source code and AST tree view
@@ -149,20 +200,32 @@ amortia/
 
 ## 🗺️ Roadmap
 
-**Phase 1: Parser & Tooling** ✓
-- Complete parser
-- AST generation and JSON export
-- Interactive visualizer with hot-reloading
+<details open>
+<summary><b>Phase 1: Parser & Tooling</b> ✓</summary>
 
-**Phase 2: Compiler** (In Progress)
-- Type checker and inference
-- Erlang code generation
-- Standard library
+- ✅ Complete parser
+- ✅ AST generation and JSON export
+- ✅ Interactive visualizer with hot-reloading
 
-**Phase 3: BEAM Integration** (Planned)
-- Core Erlang emission
-- Direct BEAM bytecode generation
-- Interop with Erlang/Elixir
+</details>
+
+<details>
+<summary><b>Phase 2: Compiler</b> (In Progress)</summary>
+
+- ⏳ Type checker and inference
+- ⏳ Erlang code generation
+- ⏳ Standard library
+
+</details>
+
+<details>
+<summary><b>Phase 3: BEAM Integration</b> (Planned)</summary>
+
+- 📋 Core Erlang emission
+- 📋 Direct BEAM bytecode generation
+- 📋 Interop with Erlang/Elixir
+
+</details>
 
 ---
 
@@ -173,5 +236,7 @@ MIT License - see LICENSE file for details
 ---
 
 <div align="center">
-  Built with ❤️ and Haskell
+  
+  ### Built with ❤️ and Haskell
+  
 </div>
