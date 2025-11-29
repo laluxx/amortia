@@ -1,0 +1,7 @@
+defn last :: [a] -> a {
+  "Docstring that can
+be as many lines as you want."
+    [] -> error badarg
+    [x] -> x
+    [_|xs] -> last xs
+}
