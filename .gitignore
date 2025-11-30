@@ -5,3 +5,6 @@ amortia
 src.erl
 src
 test-output.json
+amortia.cabal
+.stack-work
+stack.yaml.lock
