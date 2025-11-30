@@ -20,8 +20,12 @@ of a collection."
     [x|_] -> x
 }
 
--- TODO
--- defn main :: () {
---     display "Hello, World!~n"
---     halt 0
--- }
+defn main :: () {
+  "Entry point."
+    display "Hello, World!~n"
+    head [1,2,3]
+    display tail [1,2,3]
+    last [1,2,3]
+    display "Meow"
+    halt 0
+}

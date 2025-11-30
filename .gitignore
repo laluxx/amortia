@@ -3,4 +3,5 @@
 *.beam
 amortia
 src.erl
+src
 test-output.json

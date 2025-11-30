@@ -45,7 +45,7 @@ The compiler pipeline is under active development. Right now, you can parse Amor
 <td align="center" width="5%">
   
 →<br/>
-🚧
+✅
   
 </td>
 <td align="center" width="20%">
@@ -57,7 +57,7 @@ The compiler pipeline is under active development. Right now, you can parse Amor
 <td align="center" width="5%">
   
 →
-  
+🚧  
 </td>
 <td align="center" width="20%">
   
