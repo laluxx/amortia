@@ -21,7 +21,7 @@ parseAndGenerate inputFile outputFile = do
           generateErlangFile outputFile ast
           putStrLn $ "\ESC[1;32m✓\ESC[0m Successfully compiled " ++ inputFile ++ " \ESC[1;34m→\ESC[0m " ++ outputFile
         else do
-          putStrLn $ "\ESC[1;31m✗\ESC[0m Compilation error: No entry point found"
+          putStrLn "\ESC[1;31m✗\ESC[0m Compilation error: No entry point found"
           putStrLn "   Please define a main function with signature: defn main :: () { ... }"
           exitFailure
     Left err -> do

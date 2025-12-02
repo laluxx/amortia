@@ -11,7 +11,6 @@ module Codegen
 import Parser
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.List (intercalate)
 import System.Process (readProcessWithExitCode, callCommand)
 import System.Exit (ExitCode(..))
 import System.FilePath (takeBaseName)
@@ -65,16 +64,23 @@ generateClause funcName Clause{..} isLast =
   case clauseBody of
     ESeq exprs ->
       -- For sequences, put arrow on first line, then indent expressions
-      funcName <> "(" <> patterns <> ") ->\n    " <>
+      funcName <> "(" <> patterns <> ")" <> guardText <> " ->\n    " <>
       T.intercalate ",\n    " (map generateExpr exprs) <>
       terminator
     _ ->
       -- For single expressions, keep on one line
-      funcName <> "(" <> patterns <> ") -> " <> body <> terminator
+      funcName <> "(" <> patterns <> ")" <> guardText <> " -> " <> body <> terminator
   where
     patterns = T.intercalate ", " $ map generatePattern clausePatterns
+    guardText = case clauseGuard of
+      Nothing -> ""
+      Just g -> " " <> generateGuard g
     body = generateExpr clauseBody
     terminator = if isLast then "." else ";"
+
+-- | Generate code for a guard
+generateGuard :: Guard -> Text
+generateGuard (Guard expr) = "when " <> generateExpr expr
 
 -- | Generate code for a pattern
 generatePattern :: Pattern -> Text
@@ -96,6 +102,22 @@ generateExpr expr = case expr of
   EDisplay e -> generateDisplay e
   EHalt e -> "halt(" <> generateExpr e <> ")"
   ESeq exprs -> T.intercalate ", " (map generateExpr exprs)
+  EBinOp op e1 e2 -> generateBinOp op e1 e2
+
+-- | Generate code for an expression in argument position (may need parens)
+generateExprArg :: Expr -> Text
+generateExprArg expr = case expr of
+  EBinOp op e1 e2 -> "(" <> generateBinOp op e1 e2 <> ")"
+  _ -> generateExpr expr
+
+-- | Generate binary operator expression
+generateBinOp :: Text -> Expr -> Expr -> Text
+generateBinOp op e1 e2 =
+  let erlangOp = case op of
+        "<=" -> "=<"  -- Erlang uses =< not <=
+        "/=" -> "/="  -- Not equal
+        _ -> op       -- Everything else is the same
+  in generateExpr e1 <> " " <> erlangOp <> " " <> generateExpr e2
 
 -- | Generate display expression with smart formatting
 generateDisplay :: Expr -> Text
@@ -113,8 +135,8 @@ generateApp :: Expr -> Expr -> Text
 generateApp func arg =
   let (fname, args) = collectArgs func [arg]
   in case fname of
-       EVar name -> name <> "(" <> T.intercalate ", " (map generateExpr args) <> ")"
-       _ -> generateExpr func <> "(" <> generateExpr arg <> ")"
+       EVar name -> name <> "(" <> T.intercalate ", " (map generateExprArg args) <> ")"
+       _ -> generateExpr func <> "(" <> generateExprArg arg <> ")"
   where
     -- Collect all arguments from nested EApp
     collectArgs (EApp f a) acc = collectArgs f (a:acc)

@@ -13,6 +13,8 @@ of a collection."
     [_|xs] -> xs
 }
 
+
+
 defn head :: [a] -> a {
   "Return the first element
 of a collection."
@@ -27,7 +29,16 @@ defn main :: () {
     head [1, 2, 3]
     display tail [1, 2, 3]
     last [1, 2, 3]
-    display "Meow"
+    display "Meow~n"
+    display kth [1,2,3,4] 0
     halt 0
+}
+
+
+defn kth :: [a] -> Int -> a {
+    [] _ -> error badarg
+    [x|_] 0 -> x
+    [_|xs] n, when n > 0 -> kth xs n-1
+    _ _ -> error badarg
 }
 

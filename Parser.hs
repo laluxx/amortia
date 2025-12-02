@@ -14,6 +14,7 @@ module Parser
   , Pattern(..)
   , Expr(..)
   , Literal(..)
+  , Guard(..)
     -- * Parser functions
   , parseProgram
   , parseFromFile
@@ -27,7 +28,6 @@ module Parser
   , testFunctionDef
   ) where
 
-import Control.Monad (void)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Void
@@ -77,8 +77,12 @@ data Type
 
 data Clause = Clause
   { clausePatterns :: [Pattern]
+  , clauseGuard :: Maybe Guard
   , clauseBody :: Expr
   }
+  deriving (Show, Eq, Generic, ToJSON)
+
+data Guard = Guard Expr
   deriving (Show, Eq, Generic, ToJSON)
 
 data Pattern
@@ -98,6 +102,7 @@ data Expr
   | EDisplay Expr
   | EHalt Expr
   | ESeq [Expr]
+  | EBinOp Text Expr Expr
   deriving (Show, Eq, Generic, ToJSON)
 
 data Literal
@@ -130,7 +135,7 @@ symbol :: Text -> Parser Text
 symbol = L.symbol sc
 
 keywords :: [Text]
-keywords = ["defn", "error", "display", "halt"]
+keywords = ["defn", "error", "display", "halt", "when"]
 
 reserved :: Text -> Parser ()
 reserved w = lexeme . try $ string w *> notFollowedBy alphaNumChar
@@ -140,19 +145,21 @@ reserved w = lexeme . try $ string w *> notFollowedBy alphaNumChar
 identifier :: Parser Text
 identifier = (lexeme . fmap T.pack) p <?> "identifier"
   where
-    p = (:) <$> lowerChar <*> many (alphaNumChar <|> char '_')
+    p = (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
 
 varName :: Parser Text
 varName = try $ do
-  name <- identifierInline
+  name <- identifier
   if name `elem` keywords
     then fail $ "keyword " ++ T.unpack name ++ " cannot be used as identifier"
     else pure name
 
-identifierInline :: Parser Text
-identifierInline = (lexemeInline . fmap T.pack) p <?> "identifier"
-  where
-    p = (:) <$> lowerChar <*> many (alphaNumChar <|> char '_')
+varNameNoSpace :: Parser Text
+varNameNoSpace = try $ do
+  name <- T.pack <$> ((:) <$> letterChar <*> many (alphaNumChar <|> char '_'))
+  if name `elem` keywords
+    then fail $ "keyword " ++ T.unpack name ++ " cannot be used as identifier"
+    else pure name
 
 -- * Literals
 
@@ -165,15 +172,27 @@ literal = label "literal" $ choice
 integer :: Parser Integer
 integer = label "integer" $ lexeme L.decimal
 
+literalNoSpace :: Parser Literal
+literalNoSpace = choice
+  [ LInt <$> (read <$> some digitChar)
+  ]
+
 stringLiteral :: Parser Text
 stringLiteral = label "string literal" $ do
-  char '"'
+  _ <- char '"'
   content <- manyTill L.charLiteral (char '"')
   sc
   pure (T.pack content)
 
 atom :: Parser Text
 atom = label "atom" $ lexeme $ do
+  c <- lowerChar
+  cs <- many alphaNumChar
+  pure (T.pack (c:cs))
+
+-- Atom that only consumes horizontal space, not newlines
+atomNoNewline :: Parser Text
+atomNoNewline = label "atom" $ lexemeInline $ do
   c <- lowerChar
   cs <- many alphaNumChar
   pure (T.pack (c:cs))
@@ -186,7 +205,7 @@ parseType = typeArrow
     typeArrow = do
       t1 <- typeAtom
       option t1 $ do
-        symbol "->"
+        _ <- symbol "->"
         TFun t1 <$> parseType
 
 typeAtom :: Parser Type
@@ -223,7 +242,7 @@ typeParens = between (symbol "(") (symbol ")") parseType
 typeSignature :: Parser (Text, TypeSignature)
 typeSignature = do
   name <- varName
-  symbol "::"
+  _ <- symbol "::"
   ty <- parseType
   pure (name, TypeSignature (extractTypeVars ty) ty)
 
@@ -254,37 +273,28 @@ patternList = between (symbol "[") (symbol "]") $
 
 patternCons :: Parser Pattern
 patternCons = do
-  symbol "["
+  _ <- symbol "["
   p <- pattern'
-  symbol "|"
+  _ <- symbol "|"
   ps <- pattern'
-  symbol "]"
+  _ <- symbol "]"
   pure $ PCons p ps
 
 -- * Expressions
 
--- For unit function bodies: one statement per line
-statement :: Parser Expr
-statement = do
-  -- Parse one line worth of expression
-  e <- statementExpr
-  -- Consume the newline or whitespace after it
-  return e
-
-statementExpr :: Parser Expr
-statementExpr = choice
-  [ try statementDisplay
-  , try statementHalt
-  , try statementError
-  , statementVarOrApp
-  , exprList
-  , ELit <$> literal
-  ] <?> "statement"
-
--- For regular clauses: completely unrestricted
+-- Top-level expression parser with operators
 expr :: Parser Expr
-expr = exprAtom
+expr = makeExprParser exprApp operatorTable
 
+-- Function application (binds tighter than operators)
+-- Only consumes arguments until a newline is encountered
+exprApp :: Parser Expr
+exprApp = do
+  func <- exprAtom
+  args <- many (try $ hspace >> notFollowedBy newline >> exprAtom)
+  pure $ foldl EApp func args
+
+-- Atomic expressions
 exprAtom :: Parser Expr
 exprAtom = choice
   [ try exprDisplay
@@ -292,71 +302,64 @@ exprAtom = choice
   , try exprError
   , exprList
   , ELit <$> literal
-  , exprVarOrApp
+  , between (symbol "(") (symbol ")") expr  -- Parenthesized expressions
+  , try tightBinOp  -- Binary ops without spaces (n-1)
+  , EVar <$> varName
   ] <?> "expression"
 
--- REGULAR function application (for clauses): unrestricted
-exprVarOrApp :: Parser Expr
-exprVarOrApp = do
-  name <- varName
-  args <- many exprAtom
-  pure $ foldl EApp (EVar name) args
+-- Parse binary operations WITHOUT spaces (like n-1, x+1, etc.)
+tightBinOp :: Parser Expr
+tightBinOp = try $ do
+  -- Parse first operand (variable or literal)
+  e1 <- choice
+    [ EVar <$> varNameNoSpace
+    , ELit <$> literalNoSpace
+    ]
+  -- NO space before operator
+  op <- choice
+    [ "*" <$ char '*'
+    , "/" <$ char '/'
+    , "+" <$ char '+'
+    , "-" <$ (char '-' <* notFollowedBy (char '>'))  -- Make sure - is not followed by >
+    , ">=" <$ try (string ">=")
+    , "=<" <$ try (string "<=")
+    , "==" <$ try (string "==")
+    , "/=" <$ try (string "/=")
+    , ">" <$ char '>'
+    , "<" <$ char '<'
+    ]
+  -- NO space after operator
+  e2 <- choice
+    [ try $ between (char '(') (char ')') expr  -- Allow (expr) as second operand
+    , EVar <$> varNameNoSpace
+    , ELit <$> literalNoSpace
+    ]
+  -- Consume trailing whitespace
+  sc
+  pure $ EBinOp op e1 e2
 
--- STATEMENT function application: consume args until newline
-statementVarOrApp :: Parser Expr
-statementVarOrApp = do
-  name <- varNameNoSpace  -- Don't consume trailing space
-  args <- many (try $ hspace1 *> statementArg)
-  pure $ foldl EApp (EVar name) args
-
--- Variable name without consuming trailing space
-varNameNoSpace :: Parser Text
-varNameNoSpace = try $ do
-  name <- T.pack <$> ((:) <$> lowerChar <*> many (alphaNumChar <|> char '_'))
-  if name `elem` keywords
-    then fail $ "keyword " ++ T.unpack name ++ " cannot be used as identifier"
-    else pure name
-
-statementArg :: Parser Expr
-statementArg = choice
-  [ statementList  -- Use special list parser that doesn't consume newlines
-  , ELit <$> literal
-  , EVar <$> varName
+operatorTable :: [[Operator Parser Expr]]
+operatorTable =
+  [ [ InfixL (EBinOp "*" <$ symbol "*")
+    , InfixL (EBinOp "/" <$ symbol "/")
+    ]
+  , [ InfixL (EBinOp "+" <$ symbol "+")
+    , InfixL (EBinOp "-" <$ symbol "-")
+    ]
+  , [ InfixN (EBinOp ">" <$ symbol ">")
+    , InfixN (EBinOp "<" <$ symbol "<")
+    , InfixN (EBinOp ">=" <$ symbol ">=")
+    , InfixN (EBinOp "=<" <$ symbol "<=")
+    , InfixN (EBinOp "==" <$ symbol "==")
+    , InfixN (EBinOp "/=" <$ symbol "/=")
+    ]
   ]
-
--- List parser for statements (doesn't consume trailing newlines)
-statementList :: Parser Expr
-statementList = do
-  char '['
-  hspace
-  exprs <- statementExpr `sepBy` (hspace *> char ',' <* hspace)
-  hspace
-  char ']'
-  return (EList exprs)
 
 exprError :: Parser Expr
 exprError = do
   reserved "error"
-  EError <$> atom
+  EError <$> atomNoNewline
 
--- STATEMENT display: parse everything on the line
-statementDisplay :: Parser Expr
-statementDisplay = do
-  string "display"
-  notFollowedBy alphaNumChar
-  hspace1
-  -- Parse the argument which can be a function call
-  arg <- statementDisplayArg
-  return (EDisplay arg)
-
-statementDisplayArg :: Parser Expr
-statementDisplayArg = choice
-  [ ELit <$> literal
-  , statementList  -- Use statement list
-  , statementVarOrApp  -- This handles "tail [1,2,3]"
-  ]
-
--- REGULAR display: unrestricted
 exprDisplay :: Parser Expr
 exprDisplay = do
   reserved "display"
@@ -367,9 +370,64 @@ exprHalt = do
   reserved "halt"
   EHalt <$> exprAtom
 
+exprList :: Parser Expr
+exprList = between (symbol "[") (symbol "]") $
+  EList <$> expr `sepBy` symbol ","
+
+-- * Statement-level expressions (for unit function bodies)
+
+statement :: Parser Expr
+statement = statementExpr
+
+statementExpr :: Parser Expr
+statementExpr = choice
+  [ try statementDisplay
+  , try statementHalt
+  , try statementError
+  , statementVarOrApp
+  , statementList
+  , ELit <$> literal
+  ] <?> "statement"
+
+statementVarOrApp :: Parser Expr
+statementVarOrApp = do
+  name <- varNameNoSpace
+  args <- many (try $ hspace1 *> statementArg)
+  pure $ foldl EApp (EVar name) args
+
+statementArg :: Parser Expr
+statementArg = choice
+  [ statementList
+  , ELit <$> literal
+  , EVar <$> varName
+  ]
+
+statementList :: Parser Expr
+statementList = do
+  _ <- char '['
+  hspace
+  exprs <- statementExpr `sepBy` (hspace *> char ',' <* hspace)
+  hspace
+  _ <- char ']'
+  return (EList exprs)
+
+statementDisplay :: Parser Expr
+statementDisplay = do
+  _ <- string "display"
+  notFollowedBy alphaNumChar
+  hspace1
+  EDisplay <$> statementDisplayArg
+
+statementDisplayArg :: Parser Expr
+statementDisplayArg = choice
+  [ ELit <$> literal
+  , statementList
+  , statementVarOrApp
+  ]
+
 statementHalt :: Parser Expr
 statementHalt = do
-  string "halt"
+  _ <- string "halt"
   notFollowedBy alphaNumChar
   hspace1
   arg <- choice [ELit <$> literal, EVar <$> varName]
@@ -377,27 +435,51 @@ statementHalt = do
 
 statementError :: Parser Expr
 statementError = do
-  string "error"
+  _ <- string "error"
   notFollowedBy alphaNumChar
   hspace1
-  a <- atom
-  return (EError a)
-
-exprList :: Parser Expr
-exprList = between (symbol "[") (symbol "]") $
-  EList <$> expr `sepBy` symbol ","
+  EError <$> atom
 
 -- * Clauses
 
 clause :: Parser Clause
 clause = do
   sc
-  pats <- option [] $ try $ do
-    ps <- pattern' `sepBy1` hspace1
-    lookAhead (symbol "->")
-    pure ps
-  symbol "->"
-  Clause pats <$> expr
+  choice
+    [ try $ do
+        -- No patterns case (for unit functions)
+        _ <- symbol "->"
+        Clause [] Nothing <$> expr
+    , do
+        -- Has patterns case
+        firstPat <- pattern'
+        let continuePatterns acc = do
+              hspace
+              choice
+                [ try $ do
+                    -- Guard coming: ", when EXPR ->"
+                    _ <- string ", when"
+                    hspace
+                    -- Parse guard expression but stop at "->"
+                    guardExpr <- manyTill anySingle (try $ lookAhead (hspace >> string "->"))
+                    case runParser (sc *> expr <* sc <* eof) "<guard>" (T.pack guardExpr) of
+                      Left err -> fail $ "Failed to parse guard: " ++ errorBundlePretty err
+                      Right g -> return (reverse acc, Just (Guard g))
+                , try $ do
+                    -- Arrow coming, no more patterns
+                    _ <- lookAhead (string "->")
+                    return (reverse acc, Nothing)
+                , do
+                    -- Another pattern coming
+                    p <- pattern'
+                    continuePatterns (p:acc)
+                ]
+        (pats, grd) <- continuePatterns [firstPat]
+        -- Parse arrow and body
+        hspace
+        _ <- symbol "->"
+        Clause pats grd <$> expr
+    ]
 
 -- * Docstrings
 
@@ -410,13 +492,13 @@ functionDef :: Parser FunctionDefinition
 functionDef = do
   reserved "defn"
   (name, typeSig) <- typeSignature
-  symbol "{"
+  _ <- symbol "{"
   sc
   doc <- optional (try docstring <* sc)
   clauses <- if isUnitType (typeExpr typeSig)
     then unitFunctionBody
     else clause `sepEndBy` sc
-  symbol "}"
+  _ <- symbol "}"
   pure FunctionDefinition
     { funName = name
     , funTypeSignature = typeSig
@@ -428,14 +510,13 @@ isUnitType :: Type -> Bool
 isUnitType TUnit = True
 isUnitType _ = False
 
--- THE FIX: Parse statements separated by whitespace
 unitFunctionBody :: Parser [Clause]
 unitFunctionBody = do
   exprs <- statement `sepEndBy` sc
   case exprs of
     [] -> pure []
-    [e] -> pure [Clause [] e]
-    es -> pure [Clause [] (ESeq es)]
+    [e] -> pure [Clause [] Nothing e]
+    es -> pure [Clause [] Nothing (ESeq es)]
 
 -- * Top Level
 
