@@ -42,3 +42,12 @@ defn kth :: [a] -> Int -> a {
     _ _ -> error badarg
 }
 
+defn len :: [a] -> Int {
+    [] -> 0
+    [_|xs] -> 1 + len xs
+}
+
+defn reverse :: [a] -> [a] {
+    [] -> []
+    [x|xs] -> reverse xs ++ [x]
+}

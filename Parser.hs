@@ -317,7 +317,8 @@ tightBinOp = try $ do
     ]
   -- NO space before operator
   op <- choice
-    [ "*" <$ char '*'
+    [ "++" <$ try (string "++")
+    , "*" <$ char '*'
     , "/" <$ char '/'
     , "+" <$ char '+'
     , "-" <$ (char '-' <* notFollowedBy (char '>'))  -- Make sure - is not followed by >
@@ -343,7 +344,8 @@ operatorTable =
   [ [ InfixL (EBinOp "*" <$ symbol "*")
     , InfixL (EBinOp "/" <$ symbol "/")
     ]
-  , [ InfixL (EBinOp "+" <$ symbol "+")
+  , [ InfixR (EBinOp "++" <$ try (symbol "++"))  -- Must come BEFORE "+"
+    , InfixL (EBinOp "+" <$ symbol "+")
     , InfixL (EBinOp "-" <$ symbol "-")
     ]
   , [ InfixN (EBinOp ">" <$ symbol ">")

@@ -24,6 +24,10 @@ dependencies:
 - aeson
 - directory
 - time
+- fsnotify
+- lsp >= 2.0
+- lsp-types >= 2.0
+- lens
 
 ghc-options:
 - -Wall
@@ -34,13 +38,7 @@ ghc-options:
 - -Wpartial-fields
 - -Wredundant-constraints
 
-library:
-  source-dirs: .
-  exposed-modules:
-  - Parser
-  - Codegen
-  - Visualizer
-
+# Build only executables for faster compilation
 executables:
   amortia:
     main:                Main.hs
@@ -50,5 +48,20 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     - -O2
-    dependencies:
-    - amortia
+    other-modules:
+    - Parser
+    - Codegen
+    - Visualizer
+    - Lsp
+  
+  # Separate LSP server executable
+  amortia-lsp:
+    main:                MainLsp.hs
+    source-dirs:         .
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    other-modules:
+    - Parser
+    - Lsp

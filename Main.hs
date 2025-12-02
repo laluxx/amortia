@@ -1,11 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
+
 module Main where
 
 import Parser
 import Codegen
 import Visualizer
+import Lsp (runLspServer)
 import System.Environment (getArgs)
-import System.Exit (exitFailure)
+import System.Exit (exitFailure, exitWith, ExitCode(..))
 import Data.Aeson (encodeFile)
 import System.FilePath (replaceExtension)
 
@@ -42,6 +44,9 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
+    ["lsp"] -> do
+      exitCode <- runLspServer
+      exitWith $ if exitCode == 0 then ExitSuccess else ExitFailure exitCode
     ["watch", inputFile] -> watchAndVisualize inputFile
     ["visualize", inputFile] -> visualizeAST inputFile
     ["json", inputFile] -> parseToJSON inputFile "ast.json"
@@ -57,5 +62,6 @@ main = do
       putStrLn "  amortia json <file> [output]           Generate AST as JSON"
       putStrLn "  amortia watch <file>                   Watch file and auto-regenerate (hot reload)"
       putStrLn "  amortia visualize <file>               Open AST visualizer in browser"
+      putStrLn "  amortia lsp                            Start LSP server"
       putStrLn ""
       exitFailure
