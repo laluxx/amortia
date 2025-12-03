@@ -88,8 +88,22 @@ generatePattern pat = case pat of
   PVar name -> capitalize name
   PWild -> "_"
   PList pats -> "[" <> T.intercalate ", " (map generatePattern pats) <> "]"
-  PCons p ps -> "[" <> generatePattern p <> "|" <> generatePattern ps <> "]"
+  PCons p ps -> generateConsPat p ps
   PLit lit -> generateLiteral lit
+  where
+    -- Generate cons pattern, flattening nested PCons
+    generateConsPat :: Pattern -> Pattern -> Text
+    generateConsPat p rest = 
+      let (heads, maybeTail) = collectConsHeads rest [p]
+      in case maybeTail of
+           Just tailPat -> "[" <> T.intercalate ", " (map generatePattern heads) <> "|" <> generatePattern tailPat <> "]"
+           Nothing -> "[" <> T.intercalate ", " (map generatePattern heads) <> "]"
+    
+    -- Collect all the head elements from nested PCons
+    collectConsHeads :: Pattern -> [Pattern] -> ([Pattern], Maybe Pattern)
+    collectConsHeads (PCons p rest) acc = collectConsHeads rest (acc ++ [p])
+    collectConsHeads (PList []) acc = (acc, Nothing)  -- [a,b,c|[]] = [a,b,c]
+    collectConsHeads other acc = (acc, Just other)    -- [a,b,c|xs]
 
 -- | Generate code for an expression
 generateExpr :: Expr -> Text
@@ -99,10 +113,25 @@ generateExpr expr = case expr of
   EApp e1 e2 -> generateApp e1 e2
   EError atom -> "error(" <> atom <> ")"
   EList exprs -> "[" <> T.intercalate ", " (map generateExpr exprs) <> "]"
+  ECons e1 e2 -> generateConsExpr e1 e2
   EDisplay e -> generateDisplay e
   EHalt e -> "halt(" <> generateExpr e <> ")"
   ESeq exprs -> T.intercalate ", " (map generateExpr exprs)
   EBinOp op e1 e2 -> generateBinOp op e1 e2
+  where
+    -- Generate cons expression, flattening nested ECons
+    generateConsExpr :: Expr -> Expr -> Text
+    generateConsExpr e rest = 
+      let (heads, maybeTail) = collectConsExprs rest [e]
+      in case maybeTail of
+           Just tailExpr -> "[" <> T.intercalate ", " (map generateExpr heads) <> "|" <> generateExpr tailExpr <> "]"
+           Nothing -> "[" <> T.intercalate ", " (map generateExpr heads) <> "]"
+    
+    -- Collect all head elements from nested ECons
+    collectConsExprs :: Expr -> [Expr] -> ([Expr], Maybe Expr)
+    collectConsExprs (ECons e rest) acc = collectConsExprs rest (acc ++ [e])
+    collectConsExprs (EList []) acc = (acc, Nothing)  -- [a,b,c|[]] = [a,b,c]
+    collectConsExprs other acc = (acc, Just other)    -- [a,b,c|xs]
 
 -- | Generate code for an expression in argument position (may need parens)
 generateExprArg :: Expr -> Text

@@ -37,6 +37,7 @@ import qualified Text.Megaparsec.Char.Lexer as L
 import Control.Monad.Combinators.Expr
 import GHC.Generics
 import Data.Aeson (ToJSON)
+import Prelude hiding (tail)
 
 -- * Parser Type
 
@@ -99,6 +100,7 @@ data Expr
   | EApp Expr Expr
   | EError Text
   | EList [Expr]
+  | ECons Expr Expr  -- Add cons constructor for [x|xs] in expressions
   | EDisplay Expr
   | EHalt Expr
   | ESeq [Expr]
@@ -134,6 +136,9 @@ lexemeInline = L.lexeme scn
 symbol :: Text -> Parser Text
 symbol = L.symbol sc
 
+symbolInline :: Text -> Parser Text
+symbolInline = L.symbol scn
+
 keywords :: [Text]
 keywords = ["defn", "error", "display", "halt", "when"]
 
@@ -157,6 +162,13 @@ varName = try $ do
 varNameNoSpace :: Parser Text
 varNameNoSpace = try $ do
   name <- T.pack <$> ((:) <$> letterChar <*> many (alphaNumChar <|> char '_'))
+  if name `elem` keywords
+    then fail $ "keyword " ++ T.unpack name ++ " cannot be used as identifier"
+    else pure name
+
+varNameInline :: Parser Text
+varNameInline = try $ do
+  name <- lexemeInline $ T.pack <$> ((:) <$> letterChar <*> many (alphaNumChar <|> char '_'))
   if name `elem` keywords
     then fail $ "keyword " ++ T.unpack name ++ " cannot be used as identifier"
     else pure name
@@ -260,25 +272,33 @@ extractTypeVars = go []
 
 pattern' :: Parser Pattern
 pattern' = choice
-  [ try patternCons
-  , patternList
+  [ try patternList  -- Try list patterns first (handles both [a,b,c] and [a,b|c])
   , PWild <$ symbol "_"
   , PLit <$> literal
   , PVar <$> varName
   ] <?> "pattern"
 
 patternList :: Parser Pattern
-patternList = between (symbol "[") (symbol "]") $
-  PList <$> pattern' `sepBy` symbol ","
-
-patternCons :: Parser Pattern
-patternCons = do
-  _ <- symbol "["
-  p <- pattern'
-  _ <- symbol "|"
-  ps <- pattern'
-  _ <- symbol "]"
-  pure $ PCons p ps
+patternList = between (symbol "[") (symbol "]") $ do
+  -- Try parsing empty list first
+  option (PList []) $ do
+    -- Parse first pattern
+    first <- pattern'
+    -- Now either more patterns or tail
+    choice
+      [ do
+          -- Try cons pattern [x|xs]
+          _ <- symbol "|"
+          PCons first <$> pattern'
+      , do
+          -- Try comma-separated patterns, possibly with tail
+          rest <- many (symbol "," *> pattern')
+          option (PList (first:rest)) $ do
+            _ <- symbol "|"
+            tail <- pattern'
+            -- Build nested PCons: [a,b,c|tail] = a:(b:(c:tail))
+            return $ foldr PCons tail (first:rest)
+      ]
 
 -- * Expressions
 
@@ -286,12 +306,18 @@ patternCons = do
 expr :: Parser Expr
 expr = makeExprParser exprApp operatorTable
 
--- Function application (binds tighter than operators)
--- Only consumes arguments until a newline is encountered
+-- Function application - tries to consume args on the same line
 exprApp :: Parser Expr
 exprApp = do
   func <- exprAtom
-  args <- many (try $ hspace >> notFollowedBy newline >> exprAtom)
+  args <- many (try $ do
+    -- We need at least some space (but check if we're still on same line)
+    pos1 <- getSourcePos
+    hspace
+    pos2 <- getSourcePos
+    if sourceLine pos1 /= sourceLine pos2
+      then fail "newline encountered"
+      else exprAtom)
   pure $ foldl EApp func args
 
 -- Atomic expressions
@@ -321,13 +347,13 @@ tightBinOp = try $ do
     , "*" <$ char '*'
     , "/" <$ char '/'
     , "+" <$ char '+'
-    , "-" <$ (char '-' <* notFollowedBy (char '>'))  -- Make sure - is not followed by >
+    , "-" <$ try (char '-' <* notFollowedBy (char '>'))  -- Make sure - is not followed by >
     , ">=" <$ try (string ">=")
     , "=<" <$ try (string "<=")
     , "==" <$ try (string "==")
     , "/=" <$ try (string "/=")
-    , ">" <$ char '>'
-    , "<" <$ char '<'
+    , ">" <$ try (char '>' <* notFollowedBy (char '='))  -- Don't parse >= as >
+    , "<" <$ try (char '<' <* notFollowedBy (char '='))  -- Don't parse <= as <
     ]
   -- NO space after operator
   e2 <- choice
@@ -373,8 +399,17 @@ exprHalt = do
   EHalt <$> exprAtom
 
 exprList :: Parser Expr
-exprList = between (symbol "[") (symbol "]") $
-  EList <$> expr `sepBy` symbol ","
+exprList = between (symbol "[") (symbol "]") $ do
+  -- Parse comma-separated expressions
+  exprs <- expr `sepBy` symbol ","
+  -- Check if there's a | for cons notation
+  option (EList exprs) $ do
+    _ <- symbol "|"
+    tailExpr <- expr
+    -- Build cons expression: [a,b|tail] means cons a into (cons b into tail)
+    case exprs of
+      [] -> fail "Cannot have empty list before | in expression"
+      _ -> return $ foldr ECons tailExpr exprs
 
 -- * Statement-level expressions (for unit function bodies)
 
@@ -444,44 +479,138 @@ statementError = do
 
 -- * Clauses
 
+-- Symbol that only consumes horizontal space (no newlines)
+symbolInlineNoArrow :: Text -> Parser Text
+symbolInlineNoArrow s = try $ lexemeInline (string s <* notFollowedBy (string "->"))
+
+-- Expression that stops at newlines (for clause bodies)
+exprInClause :: Parser Expr
+exprInClause = makeExprParser exprAppInClause operatorTableInClause
+  where
+    -- Application stops at newlines
+    exprAppInClause = do
+      func <- exprAtomInClause
+      args <- many (try $ do
+        hspace
+        notFollowedBy newline
+        notFollowedBy (string "->")  -- Stop at arrow (next clause)
+        exprAtomInClause)
+      pure $ foldl EApp func args
+
+    -- Atomic expressions that stop at arrows
+    exprAtomInClause = choice
+      [ try exprDisplay
+      , try exprHalt
+      , try exprError
+      , exprListInClause
+      , ELit <$> literal
+      , between (symbolInline "(") (symbolInline ")") exprInClause
+      , try tightBinOpInClause
+      , EVar <$> varNameInline
+      ] <?> "expression"
+
+    -- Lists in clause context
+    exprListInClause = between (symbolInline "[") (symbolInline "]") $ do
+      exprs <- exprInClause `sepBy` symbolInline ","
+      option (EList exprs) $ do
+        _ <- symbolInline "|"
+        tailExpr <- exprInClause
+        case exprs of
+          [] -> fail "Cannot have empty list before | in expression"
+          _ -> return $ foldr ECons tailExpr exprs
+
+    -- Tight binops in clause context
+    tightBinOpInClause = try $ do
+      e1 <- choice
+        [ EVar <$> varNameNoSpace
+        , ELit <$> literalNoSpace
+        ]
+      op <- choice
+        [ "++" <$ try (string "++")
+        , "*" <$ char '*'
+        , "/" <$ char '/'
+        , "+" <$ char '+'
+        , "-" <$ try (char '-' <* notFollowedBy (char '>'))
+        , ">=" <$ try (string ">=")
+        , "=<" <$ try (string "<=")
+        , "==" <$ try (string "==")
+        , "/=" <$ try (string "/=")
+        , ">" <$ try (char '>' <* notFollowedBy (oneOf ['=', '-']))
+        , "<" <$ try (char '<' <* notFollowedBy (char '='))
+        ]
+      e2 <- choice
+        [ try $ between (char '(') (char ')') exprInClause
+        , EVar <$> varNameNoSpace
+        , ELit <$> literalNoSpace
+        ]
+      hspace
+      pure $ EBinOp op e1 e2
+
+    -- Operators that don't consume newlines
+    operatorTableInClause =
+      [ [ InfixL (EBinOp "*" <$ symbolInlineNoArrow "*")
+        , InfixL (EBinOp "/" <$ symbolInlineNoArrow "/")
+        ]
+      , [ InfixR (EBinOp "++" <$ try (symbolInlineNoArrow "++"))
+        , InfixL (EBinOp "+" <$ symbolInlineNoArrow "+")
+        , InfixL (EBinOp "-" <$ try (symbolInlineNoArrow "-" <* notFollowedBy (char '>')))
+        ]
+      , [ InfixN (EBinOp ">" <$ try (symbolInlineNoArrow ">" <* notFollowedBy (oneOf ['=', '-'])))
+        , InfixN (EBinOp "<" <$ symbolInlineNoArrow "<")
+        , InfixN (EBinOp ">=" <$ symbolInlineNoArrow ">=")
+        , InfixN (EBinOp "=<" <$ symbolInlineNoArrow "<=")
+        , InfixN (EBinOp "==" <$ symbolInlineNoArrow "==")
+        , InfixN (EBinOp "/=" <$ symbolInlineNoArrow "/=")
+        ]
+      ]
+
 clause :: Parser Clause
 clause = do
-  sc
   choice
     [ try $ do
         -- No patterns case (for unit functions)
-        _ <- symbol "->"
-        Clause [] Nothing <$> expr
-    , do
-        -- Has patterns case
-        firstPat <- pattern'
-        let continuePatterns acc = do
-              hspace
-              choice
-                [ try $ do
-                    -- Guard coming: ", when EXPR ->"
-                    _ <- string ", when"
-                    hspace
-                    -- Parse guard expression but stop at "->"
-                    guardExpr <- manyTill anySingle (try $ lookAhead (hspace >> string "->"))
-                    case runParser (sc *> expr <* sc <* eof) "<guard>" (T.pack guardExpr) of
-                      Left err -> fail $ "Failed to parse guard: " ++ errorBundlePretty err
-                      Right g -> return (reverse acc, Just (Guard g))
-                , try $ do
-                    -- Arrow coming, no more patterns
-                    _ <- lookAhead (string "->")
-                    return (reverse acc, Nothing)
-                , do
-                    -- Another pattern coming
-                    p <- pattern'
-                    continuePatterns (p:acc)
-                ]
-        (pats, grd) <- continuePatterns [firstPat]
-        -- Parse arrow and body
         hspace
-        _ <- symbol "->"
-        Clause pats grd <$> expr
+        _ <- string "->"
+        hspace
+        Clause [] Nothing <$> exprInClause
+    , do
+        -- Parse patterns on current line ONLY
+        hspace
+        firstPat <- pattern'
+        (morePats, grd) <- parsePatternsOnLine [firstPat]
+        -- Now parse arrow and body (stay on same line)
+        hspace
+        _ <- string "->"
+        hspace
+        Clause (reverse morePats) grd <$> exprInClause
     ]
+  where
+    -- Parse remaining patterns on the same line
+    parsePatternsOnLine acc = choice
+      [ try $ do
+          -- Guard case: ", when EXPR"
+          hspace
+          _ <- char ','
+          hspace
+          _ <- string "when"
+          hspace
+          -- Parse guard expression (stop at ->)
+          guardExpr <- manyTill anySingle (try $ lookAhead (hspace >> string "->"))
+          case runParser (hspace *> exprInClause <* eof) "<guard>" (T.pack guardExpr) of
+            Left err -> fail $ "Failed to parse guard: " ++ errorBundlePretty err
+            Right g -> return (acc, Just (Guard g))
+      , try $ do
+          -- Another pattern (must be on same line)
+          hspace
+          notFollowedBy newline
+          notFollowedBy (char ',')
+          notFollowedBy (string "->")
+          p <- pattern'
+          parsePatternsOnLine (p:acc)
+      , do
+          -- No more patterns or guard
+          return (acc, Nothing)
+      ]
 
 -- * Docstrings
 

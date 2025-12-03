@@ -51,3 +51,22 @@ defn reverse :: [a] -> [a] {
     [] -> []
     [x|xs] -> reverse xs ++ [x]
 }
+
+defn palindrome :: [a] -> [a] {
+    l -> l == reverse l
+}
+
+
+defn flatten :: [a] -> [a] {
+    [] -> []
+    [x|xs], when is_list x -> flatten x ++ flatten xs
+    [x|xs] -> [x] ++ flatten xs
+}
+
+defn compress :: [a] -> [a] {
+    [] -> []
+    [x] -> [x]
+    [x,x|xs] -> compress [x|xs]-- Skip duplicate
+    [x|xs] -> [x] ++ compress xs
+}
+
