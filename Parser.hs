@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# OPTIONS_GHC -Wno-overlapping-patterns #-}
 
 module Parser
   ( -- * Types
@@ -35,6 +36,7 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 import Control.Monad.Combinators.Expr
+import Control.Monad (void)
 import GHC.Generics
 import Data.Aeson (ToJSON)
 import Prelude hiding (tail)
@@ -73,6 +75,7 @@ data Type
   | TApp Type Type
   | TFun Type Type
   | TList Type
+  | TTuple [Type]
   | TUnit
   deriving (Show, Eq, Generic, ToJSON)
 
@@ -91,6 +94,7 @@ data Pattern
   | PWild
   | PList [Pattern]
   | PCons Pattern Pattern
+  | PTuple [Pattern]
   | PLit Literal
   deriving (Show, Eq, Generic, ToJSON)
 
@@ -100,7 +104,10 @@ data Expr
   | EApp Expr Expr
   | EError Text
   | EList [Expr]
-  | ECons Expr Expr  -- Add cons constructor for [x|xs] in expressions
+  | ECons Expr Expr
+  | ETuple [Expr]
+  | ELambda [Text] Expr
+  | ELet Text Expr Expr
   | EDisplay Expr
   | EHalt Expr
   | ESeq [Expr]
@@ -141,6 +148,9 @@ symbolInline = L.symbol scn
 
 keywords :: [Text]
 keywords = ["defn", "error", "display", "halt", "when"]
+
+builtins :: [Text]
+builtins = ["map", "car", "cdr"]
 
 reserved :: Text -> Parser ()
 reserved w = lexeme . try $ string w *> notFollowedBy alphaNumChar
@@ -202,7 +212,6 @@ atom = label "atom" $ lexeme $ do
   cs <- many alphaNumChar
   pure (T.pack (c:cs))
 
--- Atom that only consumes horizontal space, not newlines
 atomNoNewline :: Parser Text
 atomNoNewline = label "atom" $ lexemeInline $ do
   c <- lowerChar
@@ -224,12 +233,21 @@ typeAtom :: Parser Type
 typeAtom = choice
   [ typeUnit
   , typeList
+  , try typeTuple
   , typeParens
   , typeVarOrCon
   ] <?> "type"
 
 typeUnit :: Parser Type
 typeUnit = TUnit <$ symbol "()"
+
+typeTuple :: Parser Type
+typeTuple = between (symbol "{") (symbol "}") $ do
+  types <- parseType `sepBy` symbol ","
+  case types of
+    [] -> fail "Empty tuple type"
+    [_] -> fail "Single-element tuple type"
+    _ -> pure $ TTuple types
 
 typeVarOrCon :: Parser Type
 typeVarOrCon = do
@@ -245,8 +263,12 @@ typeVarOrCon = do
       _ -> False
 
 typeList :: Parser Type
-typeList = between (symbol "[") (symbol "]") $
-  TList <$> parseType
+typeList = between (symbol "[") (symbol "]") $ do
+  first <- parseType
+  option (TList first) $ do
+    _ <- symbol ","
+    rest <- parseType `sepBy` symbol ","
+    return $ TList (TTuple (first : rest))
 
 typeParens :: Parser Type
 typeParens = between (symbol "(") (symbol ")") parseType
@@ -266,13 +288,15 @@ extractTypeVars = go []
     go acc (TApp t1 t2) = go (go acc t1) t2
     go acc (TFun t1 t2) = go (go acc t1) t2
     go acc (TList t) = go acc t
+    go acc (TTuple ts) = foldl go acc ts
     go acc TUnit = acc
 
 -- * Patterns
 
 pattern' :: Parser Pattern
 pattern' = choice
-  [ try patternList  -- Try list patterns first (handles both [a,b,c] and [a,b|c])
+  [ try patternList
+  , try patternTuple
   , PWild <$ symbol "_"
   , PLit <$> literal
   , PVar <$> varName
@@ -280,38 +304,37 @@ pattern' = choice
 
 patternList :: Parser Pattern
 patternList = between (symbol "[") (symbol "]") $ do
-  -- Try parsing empty list first
   option (PList []) $ do
-    -- Parse first pattern
     first <- pattern'
-    -- Now either more patterns or tail
     choice
       [ do
-          -- Try cons pattern [x|xs]
           _ <- symbol "|"
           PCons first <$> pattern'
       , do
-          -- Try comma-separated patterns, possibly with tail
           rest <- many (symbol "," *> pattern')
           option (PList (first:rest)) $ do
             _ <- symbol "|"
             tail <- pattern'
-            -- Build nested PCons: [a,b,c|tail] = a:(b:(c:tail))
             return $ foldr PCons tail (first:rest)
       ]
 
+patternTuple :: Parser Pattern
+patternTuple = between (symbol "{") (symbol "}") $ do
+  pats <- pattern' `sepBy` symbol ","
+  case pats of
+    [] -> fail "Empty tuple pattern"
+    [_] -> fail "Single-element tuple pattern"
+    _ -> pure $ PTuple pats
+
 -- * Expressions
 
--- Top-level expression parser with operators
 expr :: Parser Expr
 expr = makeExprParser exprApp operatorTable
 
--- Function application - tries to consume args on the same line
 exprApp :: Parser Expr
 exprApp = do
   func <- exprAtom
   args <- many (try $ do
-    -- We need at least some space (but check if we're still on same line)
     pos1 <- getSourcePos
     hspace
     pos2 <- getSourcePos
@@ -320,48 +343,137 @@ exprApp = do
       else exprAtom)
   pure $ foldl EApp func args
 
--- Atomic expressions
 exprAtom :: Parser Expr
 exprAtom = choice
-  [ try exprDisplay
+  [ try exprLambda
+  , try exprDisplay
   , try exprHalt
   , try exprError
+  , try exprTuple
   , exprList
   , ELit <$> literal
-  , between (symbol "(") (symbol ")") expr  -- Parenthesized expressions
-  , try tightBinOp  -- Binary ops without spaces (n-1)
+  , between (symbol "(") (symbol ")") expr
+  , try tightBinOp
   , EVar <$> varName
   ] <?> "expression"
 
--- Parse binary operations WITHOUT spaces (like n-1, x+1, etc.)
+exprLambda :: Parser Expr
+exprLambda = do
+  _ <- symbol "\\"
+  params <- varName `sepBy1` hspace1
+  _ <- symbol "->"
+  body <- lambdaBody
+  pure $ ELambda params body
+  where
+    -- Lambda body stops at comma (which delimits the lambda)
+    lambdaBody = makeExprParser lambdaApp operatorTable
+    
+    lambdaApp = do
+      func <- lambdaAtom
+      args <- many (try $ do
+        pos1 <- getSourcePos
+        hspace
+        pos2 <- getSourcePos
+        if sourceLine pos1 /= sourceLine pos2
+          then fail "newline encountered"
+          else lookAhead (satisfy (/= ',')) >> lambdaAtom)
+      pure $ foldl EApp func args
+    
+    lambdaAtom = choice
+      [ try exprDisplay
+      , try exprHalt
+      , try exprError
+      , try lambdaTuple
+      , lambdaList
+      , ELit <$> literal
+      , between (symbol "(") (symbol ")") expr
+      , try tightBinOp
+      , EVar <$> varName
+      ] <?> "expression"
+    
+    -- Lists in lambda body
+    lambdaList = between (symbol "[") (symbol "]") $ do
+      exprs <- lambdaListElem `sepBy` symbol ","
+      option (EList exprs) $ do
+        _ <- symbol "|"
+        tailExpr <- lambdaListElem
+        case exprs of
+          [] -> fail "Cannot have empty list before | in expression"
+          _ -> return $ foldr ECons tailExpr exprs
+    
+    lambdaListElem = makeExprParser lambdaListElemApp operatorTable
+    
+    lambdaListElemApp = do
+      func <- lambdaAtom
+      args <- many (try $ do
+        pos1 <- getSourcePos
+        hspace
+        pos2 <- getSourcePos
+        if sourceLine pos1 /= sourceLine pos2
+          then fail "newline encountered"
+          else do
+            notFollowedBy (char ',')
+            notFollowedBy (char ']')
+            notFollowedBy (char '|')
+            lambdaAtom)
+      pure $ foldl EApp func args
+    
+    -- Tuples in lambda body
+    lambdaTuple = between (symbol "{") (symbol "}") $ do
+      exprs <- lambdaTupleElem `sepBy` symbol ","
+      case exprs of
+        [] -> fail "Empty tuple"
+        [_] -> fail "Single-element tuple"
+        _ -> pure $ ETuple exprs
+    
+    lambdaTupleElem = makeExprParser lambdaTupleElemApp operatorTable
+    
+    lambdaTupleElemApp = do
+      func <- lambdaAtom
+      args <- many (try $ do
+        pos1 <- getSourcePos
+        hspace
+        pos2 <- getSourcePos
+        if sourceLine pos1 /= sourceLine pos2
+          then fail "newline encountered"
+          else do
+            notFollowedBy (char ',')
+            notFollowedBy (char '}')
+            lambdaAtom)
+      pure $ foldl EApp func args
+
+exprTuple :: Parser Expr
+exprTuple = between (symbol "{") (symbol "}") $ do
+  exprs <- expr `sepBy` symbol ","
+  case exprs of
+    [] -> fail "Empty tuple"
+    [_] -> fail "Single-element tuple"
+    _ -> pure $ ETuple exprs
+
 tightBinOp :: Parser Expr
 tightBinOp = try $ do
-  -- Parse first operand (variable or literal)
   e1 <- choice
     [ EVar <$> varNameNoSpace
     , ELit <$> literalNoSpace
     ]
-  -- NO space before operator
   op <- choice
     [ "++" <$ try (string "++")
     , "*" <$ char '*'
     , "/" <$ char '/'
     , "+" <$ char '+'
-    , "-" <$ try (char '-' <* notFollowedBy (char '>'))  -- Make sure - is not followed by >
+    , "-" <$ try (char '-' <* notFollowedBy (char '>'))
     , ">=" <$ try (string ">=")
     , "=<" <$ try (string "<=")
     , "==" <$ try (string "==")
     , "/=" <$ try (string "/=")
-    , ">" <$ try (char '>' <* notFollowedBy (char '='))  -- Don't parse >= as >
-    , "<" <$ try (char '<' <* notFollowedBy (char '='))  -- Don't parse <= as <
+    , ">" <$ try (char '>' <* notFollowedBy (char '='))
+    , "<" <$ try (char '<' <* notFollowedBy (char '='))
     ]
-  -- NO space after operator
   e2 <- choice
-    [ try $ between (char '(') (char ')') expr  -- Allow (expr) as second operand
+    [ try $ between (char '(') (char ')') expr
     , EVar <$> varNameNoSpace
     , ELit <$> literalNoSpace
     ]
-  -- Consume trailing whitespace
   sc
   pure $ EBinOp op e1 e2
 
@@ -370,7 +482,7 @@ operatorTable =
   [ [ InfixL (EBinOp "*" <$ symbol "*")
     , InfixL (EBinOp "/" <$ symbol "/")
     ]
-  , [ InfixR (EBinOp "++" <$ try (symbol "++"))  -- Must come BEFORE "+"
+  , [ InfixR (EBinOp "++" <$ try (symbol "++"))
     , InfixL (EBinOp "+" <$ symbol "+")
     , InfixL (EBinOp "-" <$ symbol "-")
     ]
@@ -400,13 +512,10 @@ exprHalt = do
 
 exprList :: Parser Expr
 exprList = between (symbol "[") (symbol "]") $ do
-  -- Parse comma-separated expressions
   exprs <- expr `sepBy` symbol ","
-  -- Check if there's a | for cons notation
   option (EList exprs) $ do
     _ <- symbol "|"
     tailExpr <- expr
-    -- Build cons expression: [a,b|tail] means cons a into (cons b into tail)
     case exprs of
       [] -> fail "Cannot have empty list before | in expression"
       _ -> return $ foldr ECons tailExpr exprs
@@ -421,10 +530,20 @@ statementExpr = choice
   [ try statementDisplay
   , try statementHalt
   , try statementError
+  , try statementLet
   , statementVarOrApp
   , statementList
   , ELit <$> literal
   ] <?> "statement"
+
+statementLet :: Parser Expr
+statementLet = do
+  name <- varNameNoSpace
+  hspace
+  _ <- char '='
+  hspace
+  _ <- statementExpr
+  return $ EVar name
 
 statementVarOrApp :: Parser Expr
 statementVarOrApp = do
@@ -479,29 +598,43 @@ statementError = do
 
 -- * Clauses
 
--- Symbol that only consumes horizontal space (no newlines)
 symbolInlineNoArrow :: Text -> Parser Text
 symbolInlineNoArrow s = try $ lexemeInline (string s <* notFollowedBy (string "->"))
 
--- Expression that stops at newlines (for clause bodies)
 exprInClause :: Parser Expr
-exprInClause = makeExprParser exprAppInClause operatorTableInClause
+exprInClause = letBinding <|> makeExprParser exprAppInClause operatorTableInClause
   where
-    -- Application stops at newlines
+    letBinding = try $ do
+      name <- varNameInline
+      _ <- symbolInline "="
+      value <- makeExprParser exprAppInClause operatorTableInClause
+      sc
+      rest <- exprInClause
+      return $ ELet name value rest
+    
     exprAppInClause = do
       func <- exprAtomInClause
       args <- many (try $ do
         hspace
         notFollowedBy newline
-        notFollowedBy (string "->")  -- Stop at arrow (next clause)
+        notFollowedBy (string "->")
+        notFollowedBy (char '=')
         exprAtomInClause)
-      pure $ foldl EApp func args
+      let baseApp = foldl EApp func args
+      -- Check for comma continuation (for lambda delimiter)
+      option baseApp $ try $ do
+        hspace
+        _ <- char ','
+        hspace
+        rest <- exprAppInClause
+        return $ EApp baseApp rest
 
-    -- Atomic expressions that stop at arrows
     exprAtomInClause = choice
-      [ try exprDisplay
+      [ try exprLambdaInClause
+      , try exprDisplay
       , try exprHalt
       , try exprError
+      , try exprTupleInClause
       , exprListInClause
       , ELit <$> literal
       , between (symbolInline "(") (symbolInline ")") exprInClause
@@ -509,17 +642,53 @@ exprInClause = makeExprParser exprAppInClause operatorTableInClause
       , EVar <$> varNameInline
       ] <?> "expression"
 
-    -- Lists in clause context
     exprListInClause = between (symbolInline "[") (symbolInline "]") $ do
-      exprs <- exprInClause `sepBy` symbolInline ","
+      exprs <- listElemInClause `sepBy` symbolInline ","
       option (EList exprs) $ do
         _ <- symbolInline "|"
-        tailExpr <- exprInClause
+        tailExpr <- listElemInClause
         case exprs of
           [] -> fail "Cannot have empty list before | in expression"
           _ -> return $ foldr ECons tailExpr exprs
+    
+    -- List elements should not continue application across commas
+    listElemInClause = makeExprParser listElemAppInClause operatorTableInClause
+    
+    listElemAppInClause = do
+      func <- exprAtomInClause
+      args <- many (try $ do
+        hspace
+        notFollowedBy newline
+        notFollowedBy (string "->")
+        notFollowedBy (char '=')
+        notFollowedBy (char ',')  -- Stop at comma in lists
+        notFollowedBy (char ']')  -- Stop at list close
+        notFollowedBy (char '|')  -- Stop at list tail
+        exprAtomInClause)
+      pure $ foldl EApp func args
 
-    -- Tight binops in clause context
+    exprTupleInClause = between (symbolInline "{") (symbolInline "}") $ do
+      exprs <- tupleElemInClause `sepBy` symbolInline ","
+      case exprs of
+        [] -> fail "Empty tuple"
+        [_] -> fail "Single-element tuple"
+        _ -> pure $ ETuple exprs
+    
+    -- Tuple elements should not continue application across commas
+    tupleElemInClause = makeExprParser tupleElemAppInClause operatorTableInClause
+    
+    tupleElemAppInClause = do
+      func <- exprAtomInClause
+      args <- many (try $ do
+        hspace
+        notFollowedBy newline
+        notFollowedBy (string "->")
+        notFollowedBy (char '=')
+        notFollowedBy (char ',')  -- Stop at comma in tuples
+        notFollowedBy (char '}')  -- Stop at tuple close
+        exprAtomInClause)
+      pure $ foldl EApp func args
+
     tightBinOpInClause = try $ do
       e1 <- choice
         [ EVar <$> varNameNoSpace
@@ -546,7 +715,6 @@ exprInClause = makeExprParser exprAppInClause operatorTableInClause
       hspace
       pure $ EBinOp op e1 e2
 
-    -- Operators that don't consume newlines
     operatorTableInClause =
       [ [ InfixL (EBinOp "*" <$ symbolInlineNoArrow "*")
         , InfixL (EBinOp "/" <$ symbolInlineNoArrow "/")
@@ -564,51 +732,84 @@ exprInClause = makeExprParser exprAppInClause operatorTableInClause
         ]
       ]
 
+    exprLambdaInClause = do
+      _ <- symbolInline "\\"
+      params <- varName `sepBy1` hspace1
+      _ <- symbolInline "->"
+      body <- lambdaBodyInClause
+      return $ ELambda params body
+      where
+        -- Lambda body in clause stops at comma
+        lambdaBodyInClause = makeExprParser lambdaAppInClause operatorTableInClause
+        
+        lambdaAppInClause = do
+          func <- lambdaAtomInClause
+          args <- many (try $ do
+            hspace
+            notFollowedBy newline
+            notFollowedBy (string "->")
+            notFollowedBy (char '=')
+            notFollowedBy (char ',')  -- Stop at comma
+            lambdaAtomInClause)
+          pure $ foldl EApp func args
+        
+        lambdaAtomInClause = choice
+          [ try exprDisplay
+          , try exprHalt
+          , try exprError
+          , try exprTupleInClause
+          , exprListInClause
+          , ELit <$> literal
+          , between (symbolInline "(") (symbolInline ")") exprInClause
+          , try tightBinOpInClause
+          , EVar <$> varNameInline
+          ] <?> "expression"
+
 clause :: Parser Clause
 clause = do
   choice
-    [ try $ do
-        -- No patterns case (for unit functions)
-        hspace
-        _ <- string "->"
-        hspace
-        Clause [] Nothing <$> exprInClause
-    , do
-        -- Parse patterns on current line ONLY
-        hspace
-        firstPat <- pattern'
-        (morePats, grd) <- parsePatternsOnLine [firstPat]
-        -- Now parse arrow and body (stay on same line)
-        hspace
-        _ <- string "->"
-        hspace
-        Clause (reverse morePats) grd <$> exprInClause
+    [ try clauseWithNoPatterns
+    , clauseWithPatterns
     ]
   where
-    -- Parse remaining patterns on the same line
+    clauseWithNoPatterns = do
+      hspace
+      _ <- string "->"
+      hspace
+      Clause [] Nothing <$> exprInClause
+    
+    clauseWithPatterns = do
+      hspace
+      -- Try to parse as a let binding first (for single-line clauses)
+      notFollowedBy (try $ varNameNoSpace >> hspace >> char '=')
+      -- Parse patterns
+      firstPat <- pattern'
+      (morePats, grd) <- parsePatternsOnLine [firstPat]
+      hspace
+      _ <- string "->"
+      hspace
+      Clause (reverse morePats) grd <$> exprInClause
+    
     parsePatternsOnLine acc = choice
       [ try $ do
-          -- Guard case: ", when EXPR"
           hspace
           _ <- char ','
           hspace
           _ <- string "when"
           hspace
-          -- Parse guard expression (stop at ->)
           guardExpr <- manyTill anySingle (try $ lookAhead (hspace >> string "->"))
           case runParser (hspace *> exprInClause <* eof) "<guard>" (T.pack guardExpr) of
             Left err -> fail $ "Failed to parse guard: " ++ errorBundlePretty err
             Right g -> return (acc, Just (Guard g))
       , try $ do
-          -- Another pattern (must be on same line)
           hspace
           notFollowedBy newline
           notFollowedBy (char ',')
           notFollowedBy (string "->")
+          notFollowedBy $ try (varNameNoSpace >> hspace >> char '=')
           p <- pattern'
           parsePatternsOnLine (p:acc)
       , do
-          -- No more patterns or guard
           return (acc, Nothing)
       ]
 

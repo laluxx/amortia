@@ -51,8 +51,6 @@ generateFunction FunctionDefinition{..} =
       Nothing -> []
       Just doc -> map ("%~ " <>) (T.lines doc)
 
-    -- Generate clauses with proper semicolon/period handling
-    -- Handle empty function case
     clauseLines = case funClauses of
       [] -> [funName <> "() -> ok."]
       clauses -> zipWith (generateClause funName) clauses isLast
@@ -63,12 +61,10 @@ generateClause :: Text -> Clause -> Bool -> Text
 generateClause funcName Clause{..} isLast =
   case clauseBody of
     ESeq exprs ->
-      -- For sequences, put arrow on first line, then indent expressions
       funcName <> "(" <> patterns <> ")" <> guardText <> " ->\n    " <>
       T.intercalate ",\n    " (map generateExpr exprs) <>
       terminator
     _ ->
-      -- For single expressions, keep on one line
       funcName <> "(" <> patterns <> ")" <> guardText <> " -> " <> body <> terminator
   where
     patterns = T.intercalate ", " $ map generatePattern clausePatterns
@@ -89,9 +85,9 @@ generatePattern pat = case pat of
   PWild -> "_"
   PList pats -> "[" <> T.intercalate ", " (map generatePattern pats) <> "]"
   PCons p ps -> generateConsPat p ps
+  PTuple pats -> "{" <> T.intercalate ", " (map generatePattern pats) <> "}"
   PLit lit -> generateLiteral lit
   where
-    -- Generate cons pattern, flattening nested PCons
     generateConsPat :: Pattern -> Pattern -> Text
     generateConsPat p rest = 
       let (heads, maybeTail) = collectConsHeads rest [p]
@@ -99,27 +95,34 @@ generatePattern pat = case pat of
            Just tailPat -> "[" <> T.intercalate ", " (map generatePattern heads) <> "|" <> generatePattern tailPat <> "]"
            Nothing -> "[" <> T.intercalate ", " (map generatePattern heads) <> "]"
     
-    -- Collect all the head elements from nested PCons
     collectConsHeads :: Pattern -> [Pattern] -> ([Pattern], Maybe Pattern)
     collectConsHeads (PCons p rest) acc = collectConsHeads rest (acc ++ [p])
-    collectConsHeads (PList []) acc = (acc, Nothing)  -- [a,b,c|[]] = [a,b,c]
-    collectConsHeads other acc = (acc, Just other)    -- [a,b,c|xs]
+    collectConsHeads (PList []) acc = (acc, Nothing)
+    collectConsHeads other acc = (acc, Just other)
 
 -- | Generate code for an expression
 generateExpr :: Expr -> Text
 generateExpr expr = case expr of
-  EVar name -> capitalize name  -- Variables are uppercase
+  EVar name -> 
+    -- Special handling for built-in keywords
+    case name of
+      "map" -> "lists:map"
+      "car" -> "hd"
+      "cdr" -> "tl"
+      _ -> capitalize name
   ELit lit -> generateLiteral lit
   EApp e1 e2 -> generateApp e1 e2
   EError atom -> "error(" <> atom <> ")"
   EList exprs -> "[" <> T.intercalate ", " (map generateExpr exprs) <> "]"
   ECons e1 e2 -> generateConsExpr e1 e2
+  ETuple exprs -> "{" <> T.intercalate ", " (map generateExpr exprs) <> "}"
+  ELambda params body -> generateLambda params body
+  ELet name value rest -> generateLet name value rest
   EDisplay e -> generateDisplay e
   EHalt e -> "halt(" <> generateExpr e <> ")"
   ESeq exprs -> T.intercalate ", " (map generateExpr exprs)
   EBinOp op e1 e2 -> generateBinOp op e1 e2
   where
-    -- Generate cons expression, flattening nested ECons
     generateConsExpr :: Expr -> Expr -> Text
     generateConsExpr e rest = 
       let (heads, maybeTail) = collectConsExprs rest [e]
@@ -127,11 +130,21 @@ generateExpr expr = case expr of
            Just tailExpr -> "[" <> T.intercalate ", " (map generateExpr heads) <> "|" <> generateExpr tailExpr <> "]"
            Nothing -> "[" <> T.intercalate ", " (map generateExpr heads) <> "]"
     
-    -- Collect all head elements from nested ECons
     collectConsExprs :: Expr -> [Expr] -> ([Expr], Maybe Expr)
     collectConsExprs (ECons e rest) acc = collectConsExprs rest (acc ++ [e])
-    collectConsExprs (EList []) acc = (acc, Nothing)  -- [a,b,c|[]] = [a,b,c]
-    collectConsExprs other acc = (acc, Just other)    -- [a,b,c|xs]
+    collectConsExprs (EList []) acc = (acc, Nothing)
+    collectConsExprs other acc = (acc, Just other)
+
+-- | Generate lambda expression
+generateLambda :: [Text] -> Expr -> Text
+generateLambda params body =
+  "fun(" <> T.intercalate ", " (map capitalize params) <> ") -> " <>
+  generateExpr body <> " end"
+
+-- | Generate let binding
+generateLet :: Text -> Expr -> Expr -> Text
+generateLet name value rest =
+  capitalize name <> " = " <> generateExpr value <> ", " <> generateExpr rest
 
 -- | Generate code for an expression in argument position (may need parens)
 generateExprArg :: Expr -> Text
@@ -143,31 +156,30 @@ generateExprArg expr = case expr of
 generateBinOp :: Text -> Expr -> Expr -> Text
 generateBinOp op e1 e2 =
   let erlangOp = case op of
-        "<=" -> "=<"  -- Erlang uses =< not <=
-        "/=" -> "/="  -- Not equal
-        _ -> op       -- Everything else is the same
+        "<=" -> "=<"
+        "/=" -> "/="
+        _ -> op
   in generateExpr e1 <> " " <> erlangOp <> " " <> generateExpr e2
 
 -- | Generate display expression with smart formatting
 generateDisplay :: Expr -> Text
 generateDisplay expr = 
   case expr of
-    -- If it's a string literal, use it as the format string
     ELit (LString s) -> "io:format(\"" <> s <> "\")"
-    -- Otherwise, auto-format with ~p~n
     _ -> "io:format(\"~p~n\", [" <> generateExpr expr <> "])"
 
 -- | Generate a function application
--- The leftmost element is the function name (keep lowercase)
--- All arguments are expressions (variables get uppercased)
 generateApp :: Expr -> Expr -> Text
 generateApp func arg =
   let (fname, args) = collectArgs func [arg]
   in case fname of
-       EVar name -> name <> "(" <> T.intercalate ", " (map generateExprArg args) <> ")"
+       EVar name -> case name of
+         "map" -> "lists:map(" <> T.intercalate ", " (map generateExprArg args) <> ")"
+         "car" -> "hd(" <> T.intercalate ", " (map generateExprArg args) <> ")"
+         "cdr" -> "tl(" <> T.intercalate ", " (map generateExprArg args) <> ")"
+         _ -> name <> "(" <> T.intercalate ", " (map generateExprArg args) <> ")"
        _ -> generateExpr func <> "(" <> generateExprArg arg <> ")"
   where
-    -- Collect all arguments from nested EApp
     collectArgs (EApp f a) acc = collectArgs f (a:acc)
     collectArgs f acc = (f, acc)
 
@@ -179,7 +191,7 @@ capitalize = T.toUpper
 generateLiteral :: Literal -> Text
 generateLiteral lit = case lit of
   LInt n -> T.pack (show n)
-  LString s -> s  -- Don't add quotes here since we add them where needed
+  LString s -> s
   LAtom a -> a
 
 -- | Generate Erlang code and compile to BEAM with runner script
@@ -189,7 +201,6 @@ generateErlangFile outputFile program = do
   let erlangCode = generateErlangWithModule moduleName program
   writeFile outputFile (T.unpack erlangCode)
   compileErlang outputFile
-  -- Create a runner script
   createRunnerScript moduleName outputFile
 
 -- | Compile Erlang file to BEAM bytecode
@@ -203,7 +214,7 @@ compileErlang erlFile = do
 -- | Create a runner script for the BEAM module
 createRunnerScript :: Text -> FilePath -> IO ()
 createRunnerScript moduleName erlFile = do
-  let scriptName = takeBaseName erlFile  -- e.g., "src"
+  let scriptName = takeBaseName erlFile
   let scriptContent = unlines
         [ "#!/bin/bash"
         , "erl -noshell -pa . -s " ++ T.unpack moduleName ++ " main -s init stop"

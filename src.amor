@@ -70,3 +70,22 @@ defn compress :: [a] -> [a] {
     [x|xs] -> [x] ++ compress xs
 }
 
+
+defn pack :: [a] -> [[a]] {
+    [] -> []
+    list -> pack list []
+}
+
+defn pack :: [a] -> [[a]] -> [[a]] {
+    [] acc -> reverse acc
+    [x|xs] [] -> pack xs [[x]]
+    [x|xs] [[x|group]|rest] -> pack xs [[x,x|group]|rest]
+    [x|xs] acc -> pack xs [[x]|acc]
+}
+
+
+
+defn encode :: [a] -> [[Int, a]] {
+    lst -> packed = pack lst
+    map \group -> [len group, car group], packed
+}
